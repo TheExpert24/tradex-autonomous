@@ -1,14 +1,17 @@
-import pandas as pd
+import numpy as np
 
 def build_features(df):
     df = df.copy()
 
-    df["return"] = df["close"].pct_change()
-    df["ma5"] = df["close"].rolling(5).mean()
-    df["ma10"] = df["close"].rolling(10).mean()
-    df["volatility"] = df["return"].rolling(5).std()
-    df["volume_avg"] = df["volume"].rolling(5).mean()
+    if "close" not in df.columns:
+        return None
 
-    df = df.fillna(0)
+    df["return"] = df["close"].pct_change()
+    df["log_return"] = np.log(df["close"] / df["close"].shift(1))
+    df["high_low"] = (df["high"] - df["low"]) / df["close"]
+    df["open_close"] = (df["close"] - df["open"]) / df["open"]
+    df["volume_change"] = df["volume"].pct_change()
+
+    df = df.dropna()
 
     return df

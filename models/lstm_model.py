@@ -1,47 +1,38 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
 class LSTMModel(nn.Module):
-    def __init__(self, window, features, hidden=64):
+    def __init__(self, window, features):
         super().__init__()
-
-        self.lstm = nn.LSTM(
-            input_size=features,
-            hidden_size=hidden,
-            batch_first=True
-        )
-
-        self.fc = nn.Linear(hidden, 1)
+        self.lstm = nn.LSTM(features, 64, batch_first=True)
+        self.fc = nn.Linear(64, 1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         out, _ = self.lstm(x)
         out = out[:, -1, :]
         out = self.fc(out)
-        return self.sigmoid(out)
+        return self.sigmoid(out).squeeze()
 
-    def train(self, X, y, epochs=5, lr=0.001):
+    def train(self, X, y, epochs=5):
         X = torch.tensor(X, dtype=torch.float32)
-        y = torch.tensor(y, dtype=torch.float32).view(-1, 1)
+        y = torch.tensor(y, dtype=torch.float32)
 
-        optimizer = optim.Adam(self.parameters(), lr=lr)
+        opt = torch.optim.Adam(self.parameters(), lr=0.001)
         loss_fn = nn.BCELoss()
 
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-
+        for i in range(epochs):
+            opt.zero_grad()
             preds = self.forward(X)
             loss = loss_fn(preds, y)
-
             loss.backward()
-            optimizer.step()
+            opt.step()
 
-            print(f"Epoch {epoch+1}/{epochs} Loss: {loss.item():.4f}")
+            print(f"Epoch {i+1}/{epochs} Loss: {loss.item():.4f}")
 
     def save(self, path):
-        torch.save(self, path)
+        torch.save(self.state_dict(), path)
 
-    @staticmethod
-    def load(path):
-        return torch.load(path)
+    def load(self, path):
+        self.load_state_dict(torch.load(path))
+        self.eval()

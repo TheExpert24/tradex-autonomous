@@ -10,7 +10,9 @@ from models.train import make_sequences
 from signals.signal_generator import SignalGenerator
 
 from risk.risk_manager import RiskManager
+from risk.exit_manager import ExitManager
 from execution.alpaca_executor import Executor
+from execution.position_manager import PositionManager
 from config.config import *
 
 data = DataClient()
@@ -18,6 +20,8 @@ exec = Executor()
 risk = RiskManager()
 
 universe = Universe(exec.api)
+pos_manager = PositionManager(exec.api)
+exit_manager = ExitManager(exec.api)
 
 START_EQUITY = float(exec.account().equity)
 
@@ -72,6 +76,7 @@ model.train(X_all, y_all, epochs=5)
 signal_engine = SignalGenerator(model)
 
 while True:
+
     dataset = {}
 
     for s in valid_symbols:
@@ -82,7 +87,6 @@ while True:
                 continue
 
             df = build_features(df)
-
             dataset[s] = df
 
         except:
@@ -93,7 +97,7 @@ while True:
     account = exec.account()
     equity = float(account.equity)
 
-    positions = exec.api.list_positions()
+    positions = pos_manager.get_positions()
 
     if risk.check_drawdown(START_EQUITY, equity):
         break
@@ -102,11 +106,35 @@ while True:
         time.sleep(300)
         continue
 
+    for p in positions:
+        try:
+            symbol = p.symbol
+            df = dataset.get(symbol, None)
+
+            if df is None:
+                continue
+
+            price = df["close"].iloc[-1]
+
+            if exit_manager.should_exit(p, price):
+                exec.api.submit_order(
+                    symbol=symbol,
+                    qty=p.qty,
+                    side="sell",
+                    type="market",
+                    time_in_force="gtc"
+                )
+                print(f"EXIT {symbol}")
+
+        except:
+            continue
+
     for symbol, score in ranked:
+
         if score < 0.65:
             continue
 
-        if symbol in [p.symbol for p in positions]:
+        if pos_manager.has_position(symbol):
             continue
 
         try:

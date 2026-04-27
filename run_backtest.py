@@ -1,33 +1,73 @@
+import numpy as np
+
 from execution.alpaca_executor import Executor
-from universe.universe import Universe
 from data.alpaca_data import DataClient
+from data.feature_engine import build_features
+
 from models.lstm_model import LSTMModel
-from backtest.engine import Backtester
+from models.train import make_sequences
 
-exec = Executor()
-data = DataClient()
+from config.features import FEATURE_COLUMNS
 
-universe = Universe(exec.api)
+WINDOW = 30
 
-symbols = universe.get_all_symbols()[:50]
+executor = Executor()
+data = DataClient(executor.api)
 
-print("Backtesting symbols:", len(symbols))
+symbols = [
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA",
+    "UNH","XOM","JPM","V","PG","MA","HD","CVX",
+    "ABBV","LLY","KO","PEP","COST","AVGO","MRK","WMT",
+    "BAC","ADBE","CRM","NFLX","ACN","MCD","DHR","LIN",
+    "NEE","AMD","INTC","QCOM","TXN","HON","PM","ORCL",
+    "UNP","LOW","UPS","GS","MS","RTX","CAT","IBM","GE"
+]
 
-history = {}
-
-for s in symbols:
-    df = data.get_bars(s)
-    if df is not None:
-        history[s] = df
-
-model = LSTMModel(30, 12)
+model = LSTMModel(WINDOW, features=len(FEATURE_COLUMNS))
 model.load("models/lstm_model.pth")
 
-bt = Backtester(model, history)
+capital = 10000
+trades = 0
 
-results = bt.run(symbols)
+for symbol in symbols:
+    try:
+        df = data.get_bars(symbol)
 
-print("\nRESULTS")
-print("Final Value:", results["final_value"])
-print("Max Drawdown:", results["max_drawdown"])
-print("Sharpe:", results["sharpe"])
+        if df is None or len(df) < WINDOW + 50:
+            continue
+
+        df = build_features(df)
+
+        if len(df) == 0:
+            continue
+
+        close = df["close"].values
+
+        df = df[FEATURE_COLUMNS]
+
+        X, _ = make_sequences(df, WINDOW)
+
+        if len(X) == 0:
+            continue
+
+        preds = model.predict(X)
+
+        prices = close[-len(preds):]
+
+        for i in range(len(preds) - 1):
+            signal = preds[i]
+
+            position = np.tanh(signal * 10)
+
+            ret = (prices[i+1] - prices[i]) / prices[i]
+
+            capital *= (1 + position * ret)
+
+            trades += 1
+
+    except Exception as e:
+        print("ERROR:", symbol, e)
+
+print("Final Portfolio Value:", capital)
+print("Return:", (capital / 10000 - 1) * 100, "%")
+print("Trades executed:", trades)

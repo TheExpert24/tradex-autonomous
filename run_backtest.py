@@ -2,12 +2,8 @@ import numpy as np
 
 from execution.alpaca_executor import Executor
 from data.alpaca_data import DataClient
-from data.feature_engine import build_features
-from models.lstm_model import LSTMModel
-from models.train import make_sequences
-from config.features import FEATURE_COLUMNS
-
-WINDOW = 30
+from data.factors import build_factors
+from models.score_model import ScoreModel
 
 executor = Executor()
 data = DataClient(executor.api)
@@ -21,70 +17,105 @@ symbols = [
     "UNP","LOW","UPS","GS","MS","RTX","CAT","IBM","GE"
 ]
 
-model = LSTMModel(WINDOW, features=len(FEATURE_COLUMNS))
-model.load("models/lstm_model.pth")
+spy = data.get_bars("SPY")
 
-all_preds = []
+def regime_filter(spy):
+    r = spy["close"].pct_change()
+    vol = r.rolling(20).std().iloc[-1]
+    trend = r.rolling(20).mean().iloc[-1]
+
+    if np.isnan(vol) or np.isnan(trend):
+        return False
+
+    if vol > 0.02:
+        return False
+
+    if abs(trend) < 0.0003:
+        return False
+
+    return True
+
+model = ScoreModel()
+
+all_scores = []
 all_returns = []
+all_vol = []
 
 for s in symbols:
     try:
         df = data.get_bars(s)
 
-        if df is None or len(df) < WINDOW + 50:
+        if df is None or len(df) < 150:
             continue
 
-        df = build_features(df)
+        df = build_factors(df, spy)
+
         close = df["close"].values
+        spy_close = spy["close"].values[:len(close)]
 
-        df = df[FEATURE_COLUMNS]
-        df = (df - df.mean()) / (df.std() + 1e-8)
+        future_ret = (np.roll(close, -10) / close) - 1
+        spy_ret = (np.roll(spy_close, -10) / spy_close) - 1
 
-        X, _ = make_sequences(df, WINDOW)
+        alpha = future_ret - spy_ret
 
-        if len(X) < 10:
-            continue
+        df = df[:-10]
+        alpha = alpha[:-10]
 
-        preds = model.predict(X).flatten()
+        scores = model.score(df)
 
-        future_ret = (close[WINDOW+1:] - close[WINDOW:-1]) / close[WINDOW:-1]
+        vol = np.std(df["close"].pct_change().fillna(0).values) + 1e-8
 
-        min_len = min(len(preds), len(future_ret))
+        m = min(len(scores), len(alpha))
 
-        preds = preds[:min_len]
-        future_ret = future_ret[:min_len]
+        all_scores.append(scores[:m])
+        all_returns.append(alpha[:m])
+        all_vol.append(vol)
 
-        all_preds.append(preds)
-        all_returns.append(future_ret)
+    except:
+        continue
 
-    except Exception as e:
-        print("ERROR:", s, e)
+if len(all_scores) == 0:
+    raise Exception("No valid data collected.")
 
-min_len = min(len(x) for x in all_preds)
+min_len = min(len(x) for x in all_scores)
 
-preds_matrix = np.array([x[-min_len:] for x in all_preds])
+scores_matrix = np.array([x[-min_len:] for x in all_scores])
 returns_matrix = np.array([x[-min_len:] for x in all_returns])
+vol_vector = np.array(all_vol)
 
 capital = 10000
 fee = 0.0003
 
-for t in range(min_len - 1):
+position = np.zeros(len(symbols))
+alpha_decay = 0.85
 
-    preds_t = preds_matrix[:, t]
+for t in range(min_len):
+
+    if not regime_filter(spy):
+        continue
+
+    scores_t = scores_matrix[:, t]
     rets_t = returns_matrix[:, t]
 
-    ranks = np.argsort(preds_t)
+    z = (scores_t - np.mean(scores_t)) / (np.std(scores_t) + 1e-8)
 
-    long_idx = ranks[-5:]
-    short_idx = ranks[:5]
+    raw_weights = z.copy()
 
-    long_ret = np.mean(rets_t[long_idx])
-    short_ret = np.mean(rets_t[short_idx])
+    raw_weights = raw_weights / (np.sum(np.abs(raw_weights)) + 1e-8)
 
-    pnl = 0.5 * long_ret - 0.5 * short_ret
+    vol_adj = 1 / vol_vector
+    vol_adj = vol_adj / np.sum(vol_adj)
 
-    capital *= (1 + pnl - fee)
+    target = raw_weights * vol_adj
+
+    position = alpha_decay * position + (1 - alpha_decay) * target
+
+    pnl = np.sum(position * rets_t)
+
+    turnover = np.sum(np.abs(position - target))
+
+    capital *= (1 + pnl - fee * turnover)
 
 print("Final Portfolio Value:", capital)
-print("Return:", (capital / 10000 - 1) * 100, "%")
-print("Trades executed:", min_len)
+print("Return %:", (capital / 10000 - 1) * 100)
+print("Trades:", min_len)

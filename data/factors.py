@@ -1,17 +1,29 @@
 import numpy as np
 
-def build_factors(df, spy_df):
+def build_factors(df, spy, sector):
     df = df.copy()
 
-    ret = df["close"].pct_change()
-    spy_ret = spy_df["close"].pct_change()
+    r = df["close"].pct_change()
+    spy_r = spy["close"].pct_change()
+    sector_r = sector["close"].pct_change()
 
-    excess = ret - spy_ret
+    rel_market = r - spy_r
+    rel_sector = r - sector_r
 
-    df["alpha_momentum"] = excess.rolling(12).sum()
-    df["alpha_reversal"] = -excess.rolling(3).mean()
-    df["volatility"] = ret.rolling(20).std()
+    macro_trend = spy_r.rolling(20).mean()
+    macro_vol = spy_r.rolling(20).std()
+
+    sentiment_proxy = (rel_sector.rolling(5).mean() - rel_market.rolling(5).mean())
+
+    df["momentum"] = rel_market.rolling(12).mean()
+    df["reversal"] = -rel_market.rolling(3).mean()
+    df["sector_strength"] = rel_sector.rolling(12).mean()
+
+    df["macro_trend"] = macro_trend
+    df["macro_vol"] = macro_vol
+    df["sentiment"] = sentiment_proxy
+
+    df["volatility"] = r.rolling(20).std()
     df["volume_signal"] = df["volume"] / (df["volume"].rolling(20).mean() + 1e-8)
 
-    df = df.dropna()
-    return df
+    return df.dropna()

@@ -2,20 +2,22 @@ import numpy as np
 
 class ScoreModel:
     def __init__(self):
-        self.weights = {
-            "momentum_12_1": 0.45,
-            "mean_reversion_5": 0.25,
-            "volume_signal": 0.15,
-            "volatility": -0.25
+        self.w = {
+            "momentum": 0.25,
+            "reversal": 0.15,
+            "sector_strength": 0.20,
+            "sentiment": 0.25,
+            "macro_trend": 0.15,
+            "volume_signal": 0.05,
+            "volatility": -0.2
         }
 
     def score(self, df):
-        score = np.zeros(len(df))
+        s = np.zeros(len(df))
 
-        for f, w in self.weights.items():
-            if f in df.columns:
-                x = df[f].values
-                x = (x - np.mean(x)) / (np.std(x) + 1e-8)
-                score += w * x
+        for k, w in self.w.items():
+            x = df[k].values
+            x = (x - np.mean(x)) / (np.std(x) + 1e-8)
+            s += w * x
 
-        return score
+        return s

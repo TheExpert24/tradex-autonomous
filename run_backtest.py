@@ -1,121 +1,134 @@
 import numpy as np
+import pandas as pd
 
-from execution.alpaca_executor import Executor
-from data.alpaca_data import DataClient
-from data.factors import build_factors
-from models.score_model import ScoreModel
 
-executor = Executor()
-data = DataClient(executor.api)
+class MomentumStrategy:
+    def __init__(self, lookback=20):
+        self.lookback = lookback
 
-symbols = [
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA",
-    "UNH","XOM","JPM","V","PG","MA","HD","CVX",
-    "ABBV","LLY","KO","PEP","COST","AVGO","MRK","WMT",
-    "BAC","ADBE","CRM","NFLX","ACN","MCD","DHR","LIN",
-    "NEE","AMD","INTC","QCOM","TXN","HON","PM","ORCL",
-    "UNP","LOW","UPS","GS","MS","RTX","CAT","IBM","GE"
-]
+    def generate(self, data, i):
+        if i < self.lookback:
+            return 0
 
-spy = data.get_bars("SPY")
+        prices = data["close"].iloc[i - self.lookback:i]
 
-def regime_filter(spy):
-    r = spy["close"].pct_change()
-    vol = r.rolling(20).std().iloc[-1]
-    trend = r.rolling(20).mean().iloc[-1]
+        momentum = np.log(prices.iloc[-1] / prices.iloc[0])
+        slope = np.polyfit(np.arange(len(prices)), prices.values, 1)[0]
 
-    if np.isnan(vol) or np.isnan(trend):
-        return False
+        rets = prices.pct_change().dropna()
+        vol = np.std(rets)
 
-    if vol > 0.02:
-        return False
+        if np.isnan(vol) or vol == 0 or vol < 0.001:
+            return 0
 
-    if abs(trend) < 0.0003:
-        return False
+        if momentum > 0 and slope > 0:
+            return 1
+        if momentum < 0 and slope < 0:
+            return -1
 
-    return True
+        return 0
 
-model = ScoreModel()
 
-all_scores = []
-all_returns = []
-all_vol = []
+class Portfolio:
+    def __init__(self, initial_cash=10000):
+        self.cash = initial_cash
+        self.position = 0.0
+        self.entry_price = None
+        self.trades = []
 
-for s in symbols:
-    try:
-        df = data.get_bars(s)
+    def mark_to_market(self, price):
+        return self.cash + self.position * price
 
-        if df is None or len(df) < 150:
-            continue
+    def buy(self, price, size):
+        cost = price * size
+        if cost > self.cash:
+            size = self.cash / price
+            cost = price * size
 
-        df = build_factors(df, spy)
+        self.cash -= cost
+        self.position += size
+        self.entry_price = price
 
-        close = df["close"].values
-        spy_close = spy["close"].values[:len(close)]
+        self.trades.append({"type": "BUY", "price": price, "size": size})
 
-        future_ret = (np.roll(close, -10) / close) - 1
-        spy_ret = (np.roll(spy_close, -10) / spy_close) - 1
+    def sell(self, price):
+        if self.position == 0:
+            return
 
-        alpha = future_ret - spy_ret
+        pnl = (price - self.entry_price) * self.position
+        self.cash += self.position * price
 
-        df = df[:-10]
-        alpha = alpha[:-10]
+        self.trades.append({"type": "SELL", "price": price, "size": self.position, "pnl": pnl})
 
-        scores = model.score(df)
+        self.position = 0
+        self.entry_price = None
 
-        vol = np.std(df["close"].pct_change().fillna(0).values) + 1e-8
 
-        m = min(len(scores), len(alpha))
+class Backtester:
+    def __init__(self, data, strategy):
+        self.data = data
+        self.strategy = strategy
+        self.portfolio = Portfolio()
+        self.equity_curve = []
 
-        all_scores.append(scores[:m])
-        all_returns.append(alpha[:m])
-        all_vol.append(vol)
+    def run(self):
+        for i in range(len(self.data)):
+            price = float(self.data["close"].iloc[i])
+            signal = self.strategy.generate(self.data, i)
 
-    except:
-        continue
+            size = (self.portfolio.cash * 0.1) / price
 
-if len(all_scores) == 0:
-    raise Exception("No valid data collected.")
+            if signal == 1 and self.portfolio.position == 0:
+                self.portfolio.buy(price, size)
+            elif signal == -1 and self.portfolio.position > 0:
+                self.portfolio.sell(price)
 
-min_len = min(len(x) for x in all_scores)
+            self.equity_curve.append(self.portfolio.mark_to_market(price))
 
-scores_matrix = np.array([x[-min_len:] for x in all_scores])
-returns_matrix = np.array([x[-min_len:] for x in all_returns])
-vol_vector = np.array(all_vol)
+        return self.report()
 
-capital = 10000
-fee = 0.0003
+    def report(self):
+        equity = np.array(self.equity_curve)
+        returns = np.diff(equity) / (equity[:-1] + 1e-9)
 
-position = np.zeros(len(symbols))
-alpha_decay = 0.85
+        total_return = (equity[-1] - equity[0]) / equity[0]
 
-for t in range(min_len):
+        peak = equity[0]
+        max_dd = 0
+        for e in equity:
+            peak = max(peak, e)
+            max_dd = max(max_dd, (peak - e) / peak)
 
-    if not regime_filter(spy):
-        continue
+        sharpe = np.mean(returns) / (np.std(returns) + 1e-9) * np.sqrt(252)
 
-    scores_t = scores_matrix[:, t]
-    rets_t = returns_matrix[:, t]
+        trades = self.portfolio.trades
+        wins = [t["pnl"] for t in trades if t.get("pnl", 0) > 0]
+        losses = [t["pnl"] for t in trades if t.get("pnl", 0) < 0]
 
-    z = (scores_t - np.mean(scores_t)) / (np.std(scores_t) + 1e-8)
+        win_rate = len(wins) / max(len(wins) + len(losses), 1)
+        profit_factor = sum(wins) / abs(sum(losses)) if losses else float("inf")
 
-    raw_weights = z.copy()
+        print("\n--- INSTITUTIONAL REPORT ---")
+        print(f"Total Return: {total_return:.4f}")
+        print(f"Max Drawdown: {max_dd:.4f}")
+        print(f"Sharpe Ratio: {sharpe:.4f}")
+        print(f"Win Rate: {win_rate:.4f}")
+        print(f"Profit Factor: {profit_factor:.4f}")
+        print(f"Trades: {len(trades)}")
 
-    raw_weights = raw_weights / (np.sum(np.abs(raw_weights)) + 1e-8)
+        return equity[-1]
 
-    vol_adj = 1 / vol_vector
-    vol_adj = vol_adj / np.sum(vol_adj)
 
-    target = raw_weights * vol_adj
+class Simulator:
+    def __init__(self, data):
+        self.engine = Backtester(data, MomentumStrategy())
 
-    position = alpha_decay * position + (1 - alpha_decay) * target
+    def run(self):
+        return self.engine.run()
 
-    pnl = np.sum(position * rets_t)
 
-    turnover = np.sum(np.abs(position - target))
-
-    capital *= (1 + pnl - fee * turnover)
-
-print("Final Portfolio Value:", capital)
-print("Return %:", (capital / 10000 - 1) * 100)
-print("Trades:", min_len)
+if __name__ == "__main__":
+    data = pd.DataFrame({"close": 100 + np.cumsum(np.random.randn(1000))})
+    sim = Simulator(data)
+    final_equity = sim.run()
+    print(f"\nfinal equity: {final_equity}")

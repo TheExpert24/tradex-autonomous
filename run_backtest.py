@@ -1,134 +1,114 @@
 import numpy as np
-import pandas as pd
+import time
+from sp500_universe import load_top_liquid
+from vwap_strategy import signal
+from execution.alpaca_executor import Executor
+from data.alpaca_data import DataClient
 
+executor = Executor()
+data_client = DataClient(executor.api)
 
-class MomentumStrategy:
-    def __init__(self, lookback=20):
-        self.lookback = lookback
+symbols = load_top_liquid()
 
-    def generate(self, data, i):
-        if i < self.lookback:
-            return 0
+data = {}
 
-        prices = data["close"].iloc[i - self.lookback:i]
+for i, s in enumerate(symbols):
+    if i % 5 == 0:
+        time.sleep(0.2)
 
-        momentum = np.log(prices.iloc[-1] / prices.iloc[0])
-        slope = np.polyfit(np.arange(len(prices)), prices.values, 1)[0]
+    try:
+        df = data_client.get_bars(s)
+        if df is None or len(df) < 100:
+            continue
+        data[s] = df
+    except:
+        continue
 
-        rets = prices.pct_change().dropna()
-        vol = np.std(rets)
-
-        if np.isnan(vol) or vol == 0 or vol < 0.001:
-            return 0
-
-        if momentum > 0 and slope > 0:
-            return 1
-        if momentum < 0 and slope < 0:
-            return -1
-
-        return 0
-
+symbols = list(data.keys())
 
 class Portfolio:
-    def __init__(self, initial_cash=10000):
-        self.cash = initial_cash
-        self.position = 0.0
-        self.entry_price = None
+    def __init__(self, cash=10000):
+        self.cash = cash
+        self.positions = {}
+        self.entry = {}
         self.trades = []
 
-    def mark_to_market(self, price):
-        return self.cash + self.position * price
+    def value(self, prices):
+        total = self.cash
+        for s, q in self.positions.items():
+            total += q * prices.get(s, 0)
+        return total
 
-    def buy(self, price, size):
-        cost = price * size
+    def buy(self, s, price, qty):
+        cost = price * qty
         if cost > self.cash:
-            size = self.cash / price
-            cost = price * size
-
+            qty = self.cash / price
+            cost = price * qty
         self.cash -= cost
-        self.position += size
-        self.entry_price = price
+        self.positions[s] = self.positions.get(s, 0) + qty
+        self.entry[s] = price
+        self.trades.append(("BUY", s, price, qty))
 
-        self.trades.append({"type": "BUY", "price": price, "size": size})
-
-    def sell(self, price):
-        if self.position == 0:
+    def sell(self, s, price):
+        if s not in self.positions:
             return
-
-        pnl = (price - self.entry_price) * self.position
-        self.cash += self.position * price
-
-        self.trades.append({"type": "SELL", "price": price, "size": self.position, "pnl": pnl})
-
-        self.position = 0
-        self.entry_price = None
-
-
-class Backtester:
-    def __init__(self, data, strategy):
-        self.data = data
-        self.strategy = strategy
-        self.portfolio = Portfolio()
-        self.equity_curve = []
-
-    def run(self):
-        for i in range(len(self.data)):
-            price = float(self.data["close"].iloc[i])
-            signal = self.strategy.generate(self.data, i)
-
-            size = (self.portfolio.cash * 0.1) / price
-
-            if signal == 1 and self.portfolio.position == 0:
-                self.portfolio.buy(price, size)
-            elif signal == -1 and self.portfolio.position > 0:
-                self.portfolio.sell(price)
-
-            self.equity_curve.append(self.portfolio.mark_to_market(price))
-
-        return self.report()
-
-    def report(self):
-        equity = np.array(self.equity_curve)
-        returns = np.diff(equity) / (equity[:-1] + 1e-9)
-
-        total_return = (equity[-1] - equity[0]) / equity[0]
-
-        peak = equity[0]
-        max_dd = 0
-        for e in equity:
-            peak = max(peak, e)
-            max_dd = max(max_dd, (peak - e) / peak)
-
-        sharpe = np.mean(returns) / (np.std(returns) + 1e-9) * np.sqrt(252)
-
-        trades = self.portfolio.trades
-        wins = [t["pnl"] for t in trades if t.get("pnl", 0) > 0]
-        losses = [t["pnl"] for t in trades if t.get("pnl", 0) < 0]
-
-        win_rate = len(wins) / max(len(wins) + len(losses), 1)
-        profit_factor = sum(wins) / abs(sum(losses)) if losses else float("inf")
-
-        print("\n--- INSTITUTIONAL REPORT ---")
-        print(f"Total Return: {total_return:.4f}")
-        print(f"Max Drawdown: {max_dd:.4f}")
-        print(f"Sharpe Ratio: {sharpe:.4f}")
-        print(f"Win Rate: {win_rate:.4f}")
-        print(f"Profit Factor: {profit_factor:.4f}")
-        print(f"Trades: {len(trades)}")
-
-        return equity[-1]
+        qty = self.positions[s]
+        entry = self.entry.get(s, price)
+        pnl = (price - entry) * qty
+        self.cash += qty * price
+        self.trades.append(("SELL", s, price, qty, pnl))
+        del self.positions[s]
+        del self.entry[s]
 
 
-class Simulator:
-    def __init__(self, data):
-        self.engine = Backtester(data, MomentumStrategy())
+portfolio = Portfolio()
+equity_curve = []
 
-    def run(self):
-        return self.engine.run()
+length = min(len(data[s]) for s in symbols)
+
+for i in range(50, length):
+
+    prices = {}
+    scores = []
+
+    for s in symbols:
+        df = data[s]
+        price = float(df["close"].iloc[i])
+        prices[s] = price
+
+        sig = signal(df)
+        scores.append((s, abs(sig), sig, price))
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    top = scores[:40]
+
+    for s, _, sig, price in top:
+        qty = (portfolio.cash * 0.001) / price
+
+        if sig > 0:
+            portfolio.buy(s, price, qty)
+        elif sig < 0:
+            portfolio.sell(s, price)
+
+    equity_curve.append(portfolio.value(prices))
 
 
-if __name__ == "__main__":
-    data = pd.DataFrame({"close": 100 + np.cumsum(np.random.randn(1000))})
-    sim = Simulator(data)
-    final_equity = sim.run()
-    print(f"\nfinal equity: {final_equity}")
+eq = np.array(equity_curve)
+rets = np.diff(eq) / (eq[:-1] + 1e-9)
+
+total_return = (eq[-1] - eq[0]) / eq[0]
+
+peak = eq[0]
+max_dd = 0
+
+for x in eq:
+    peak = max(peak, x)
+    max_dd = max(max_dd, (peak - x) / peak)
+
+sharpe = np.mean(rets) / (np.std(rets) + 1e-9) * np.sqrt(252)
+
+print("RETURN", total_return)
+print("MAX_DD", max_dd)
+print("SHARPE", sharpe)
+print("TRADES", len(portfolio.trades))
+print("FINAL", eq[-1])

@@ -1,8 +1,9 @@
 import time
 import os
-import numpy as np
 from dotenv import load_dotenv
 from alpaca_trade_api.rest import REST
+from sp500_universe import load_top_liquid
+from vwap_strategy import signal
 
 load_dotenv()
 
@@ -12,102 +13,90 @@ api = REST(
     os.getenv("APCA_API_BASE_URL")
 )
 
-symbols = ["AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL"]
-
-THRESHOLD = 0.05
-COOLDOWN = 120
-MAX_POSITIONS = 5
+symbols = load_top_liquid()
 
 positions = {}
 last_trade_time = {}
 
+COOLDOWN = 300
+MAX_POSITIONS = 25
+
+
 def get_bars(symbol):
     try:
-        df = api.get_bars(symbol, "5Min", limit=50).df
-        if df is None or len(df) < 20:
+        df = api.get_bars(symbol, "5Min", limit=51).df
+        if df is None or len(df) < 40:
             return None
-        return df
-    except Exception as e:
-        print("data error", symbol, e)
+        return df.iloc[:-1]
+    except:
         return None
 
-def vwap_signal(df):
-    vwap = (df["close"] * df["volume"]).cumsum() / (df["volume"].cumsum() + 1e-8)
-    dev = (df["close"] - vwap) / (vwap + 1e-8)
-    z = (dev - dev.mean()) / (dev.std() + 1e-8)
-    return -z.iloc[-1]
-
-def can_trade(symbol):
-    if symbol not in last_trade_time:
-        return True
-    return time.time() - last_trade_time[symbol] > COOLDOWN
 
 def get_equity():
     return float(api.get_account().equity)
 
-def trade(symbol):
-    print("processing", symbol)
 
+def can_trade(symbol):
+    return time.time() - last_trade_time.get(symbol, 0) > COOLDOWN
+
+
+def trade(symbol):
     df = get_bars(symbol)
     if df is None:
-        print("no data", symbol)
         return
 
-    sig = vwap_signal(df)
+    sig = signal(df)
     price = df["close"].iloc[-1]
 
-    print(symbol, "signal:", round(sig, 4), "price:", round(price, 2))
+    print(f"{symbol} | signal={sig:.2f} | price={price:.2f}")
 
-    if abs(sig) < THRESHOLD:
+    if sig == 0:
         return
 
     if not can_trade(symbol):
-        print("cooldown active", symbol)
         return
 
     if len(positions) >= MAX_POSITIONS and symbol not in positions:
-        print("max positions reached")
         return
 
     equity = get_equity()
-    allocation = equity * 0.05
-    qty = int(allocation / price)
+    risk_per_trade = equity * 0.001
 
-    if qty <= 0:
-        return
+    qty = risk_per_trade / price
+    qty = max(int(qty), 1)
 
     try:
         if sig > 0:
-            side = "buy"
-            positions[symbol] = "long"
+            api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side="buy",
+                type="market",
+                time_in_force="day"
+            )
+            positions[symbol] = qty
         else:
-            side = "sell"
-            positions[symbol] = "short"
-
-        api.submit_order(
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            type="market",
-            time_in_force="day"
-        )
+            api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side="sell",
+                type="market",
+                time_in_force="day"
+            )
+            positions.pop(symbol, None)
 
         last_trade_time[symbol] = time.time()
 
-        print("trade executed", symbol, side, qty)
-
     except Exception as e:
-        print("order error", symbol, e)
+        print(symbol, "error", e)
+
 
 while True:
-    try:
-        print("\nEquity:", get_equity(), "| Positions:", len(positions))
+    print("\nEquity:", get_equity(), "Positions:", len(positions))
 
-        for s in symbols:
-            trade(s)
+    for i, s in enumerate(symbols):
+        if i % 5 == 0:
+            time.sleep(0.2)
+        trade(s)
 
-        time.sleep(60)
-
-    except Exception as e:
-        print("loop error", e)
-        time.sleep(5)
+    time.sleep(60)
